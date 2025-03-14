@@ -149,6 +149,7 @@ pub async fn main_dish(
     */
     for i in 0..plate.len() {
         let mut balances = bot_balances.clone();
+        println!("aaaaaa:{:?}",balances);
         let mut sandwiches = Vec::new();
 
         for j in 0..(i + 1) {

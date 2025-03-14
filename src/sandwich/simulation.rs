@@ -138,7 +138,6 @@ pub async fn extract_swap_info(
 
     let mut logs = Vec::new();
     extract_logs(&frame, &mut logs);
-
     for log in &logs {
         match &log.topics {
             Some(topics) => {

@@ -60,7 +60,7 @@ pub async fn load_all_tokens(
     provider: &Arc<Provider<Ws>>,
     block_number: U64,
     pools: &Vec<Pool>,
-    prev_pool_id: i64,
+    chunk: u64,
 ) -> Result<HashMap<H160, Token>> {
     let cache_file = "cache/.cached-tokens.csv";
     let file_path = Path::new(cache_file);
@@ -89,7 +89,23 @@ pub async fn load_all_tokens(
         writer.write_record(&["id", "address", "name", "symbol", "decimals"])?;
     }
 
-    let pb = ProgressBar::new(pools.len() as u64);
+    let mut pool_processed = 0;
+    let mut pool_range = Vec::new();
+
+    loop {
+        let start_idx = 1 + pool_processed;
+        let mut end_idx = start_idx + chunk - 1;
+        if end_idx > pools.len() as u64 {
+            end_idx = pools.len() as u64;
+            pool_range.push((start_idx, end_idx));
+            break;
+        }
+        pool_range.push((start_idx, end_idx));
+        pool_processed += chunk;
+    }
+    info!("Pool range: {:?}", pool_range);
+
+    let pb = ProgressBar::new(pool_range.len() as u64);
     pb.set_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
@@ -100,65 +116,41 @@ pub async fn load_all_tokens(
 
     let new_token_id = token_id;
 
-    for pool in pools {
-        let pool_id = pool.id;
-        if pool_id < prev_pool_id - 50 {
-            continue;
-        }
-
-        let token0 = pool.token0;
-        let token1 = pool.token1;
-
-        for token in vec![token0, token1] {
-            if !tokens_map.contains_key(&token) {
-                match get_token_info(provider, block_number.into(), token).await {
-                    Ok(token_info) => {
-                        tokens_map.insert(
-                            token,
-                            Token {
+    for (start_idx, end_idx) in pool_range {
+        let mut new_tokens = Vec::new(); // 用于存储本次新增的 token
+        for pool in &pools[start_idx as usize..end_idx as usize] {
+            for token in vec![pool.token0, pool.token1] {
+                if !tokens_map.contains_key(&token) {
+                    match get_token_info(provider, block_number.into(), token).await {
+                        Ok(token_info) => {
+                            let new_token = Token {
                                 id: token_id,
                                 address: token,
                                 name: token_info.name,
                                 symbol: token_info.symbol,
                                 decimals: token_info.decimals,
                                 pool_ids: Vec::new(),
-                            },
-                        );
-                        token_id += 1;
+                            };
+                            tokens_map.insert(token, new_token.clone());
+                            new_tokens.push(new_token);
+                            token_id += 1;
+                        }
+                        _ => {}
                     }
-                    Err(_) => {}
                 }
             }
         }
 
+        // **去重后写入 CSV**
+        for token in &new_tokens {
+            writer.serialize(token.cache_row())?;
+        }
+        writer.flush()?; // 立即写入文件
+
         pb.inc(1);
     }
 
-    for pool in pools {
-        let pool_id = pool.id;
-
-        let token0 = pool.token0;
-        let token1 = pool.token1;
-        for token in vec![token0, token1] {
-            if let Some(token_map) = tokens_map.get_mut(&token) {
-                token_map.pool_ids.push(pool_id);
-            }
-        }
-    }
-
-    info!("Token count: {:?}", tokens_map.len());
-
-    let mut added = 0;
-    let mut tokens_vec: Vec<&Token> = tokens_map.values().collect();
-    tokens_vec.sort_by_key(|t| t.id);
-    for token in tokens_vec.iter() {
-        if token.id >= new_token_id {
-            writer.serialize(token.cache_row())?;
-            added += 1;
-        }
-    }
-    writer.flush()?;
-    info!("Added {:?} new tokens", added);
+    info!("Added {:?} new tokens", token_id - new_token_id);
 
     Ok(tokens_map)
 }

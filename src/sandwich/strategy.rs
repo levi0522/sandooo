@@ -22,12 +22,12 @@ use crate::sandwich::simulation::{extract_swap_info, PendingTxInfo, Sandwich};
 pub async fn run_sandwich_strategy(provider: Arc<Provider<Ws>>, event_sender: Sender<Event>) {
     let env = Env::new();
 
-    let (pools, prev_pool_id) = load_all_pools(env.wss_url.clone(), 10000000, 50000)
+    let pools = load_all_pools(env.wss_url.clone(), 10000000, 100000)
         .await
         .unwrap();
 
     let block_number = provider.get_block_number().await.unwrap();
-    let tokens_map = load_all_tokens(&provider, block_number, &pools, prev_pool_id)
+    let tokens_map = load_all_tokens(&provider, block_number, &pools, 100)
         .await
         .unwrap();
     info!("Tokens map count: {:?}", tokens_map.len());
@@ -104,7 +104,7 @@ pub async fn run_sandwich_strategy(provider: Arc<Provider<Ws>>, event_sender: Se
                     for tx_hash in &txs {
                         if pending_txs.contains_key(tx_hash) {
                             // Remove any pending txs that have been confirmed
-                            let removed = pending_txs.remove(tx_hash).unwrap();
+                            let _removed = pending_txs.remove(tx_hash).unwrap();
                             promising_sandwiches.remove(tx_hash);
                             // info!(
                             //     "⚪️ V{:?} TX REMOVED: {:?} / Pending txs: {:?}",
@@ -117,7 +117,7 @@ pub async fn run_sandwich_strategy(provider: Arc<Provider<Ws>>, event_sender: Se
 
                     // remove pending txs older than 5 blocks
                     pending_txs.retain(|_, v| {
-                        (new_block.block_number - v.pending_tx.added_block.unwrap()) < U64::from(3)
+                        (new_block.block_number - v.pending_tx.added_block.unwrap()) < U64::from(5)
                     });
                     promising_sandwiches.retain(|h, _| pending_txs.contains_key(h));
                 }
@@ -201,6 +201,8 @@ pub async fn run_sandwich_strategy(provider: Arc<Provider<Ws>>, event_sender: Se
                             Err(e) => warn!("appetizer error: {e:?}"),
                             _ => {}
                         }
+
+                        println!("-----------promising_sandwiches len------------{:?}",promising_sandwiches.len());
 
                         if promising_sandwiches.len() > 0 {
                             match main_dish(

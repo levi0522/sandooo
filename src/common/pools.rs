@@ -112,11 +112,13 @@ pub async fn load_all_pools(
     wss_url: String,
     from_block: u64,
     chunk: u64,
-) -> Result<(Vec<Pool>, i64)> {
+) -> Result<Vec<Pool>> {
     match create_dir_all("cache") {
         _ => {}
     }
+
     let cache_file = "cache/.cached-pools.csv";
+
     let file_path = Path::new(cache_file);
     let file_exists = file_path.exists();
     let file = OpenOptions::new()
@@ -127,20 +129,29 @@ pub async fn load_all_pools(
         .unwrap();
     let mut writer = csv::Writer::from_writer(file);
 
+    let mut from_block = from_block;
+
     let mut pools = Vec::new();
 
     let mut v2_pool_cnt = 0;
 
     if file_exists {
         let mut reader = csv::Reader::from_path(file_path)?;
-
+        let mut max_block_number = 0;
         for row in reader.records() {
             let row = row.unwrap();
             let pool = Pool::from(row);
             match pool.version {
                 DexVariant::UniswapV2 => v2_pool_cnt += 1,
             }
+
+            if pool.block_number > max_block_number {
+                max_block_number = pool.block_number;
+            }
             pools.push(pool);
+        }
+        if max_block_number > 0 {
+            from_block = max_block_number + 1;
         }
     } else {
         writer.write_record(&[
@@ -166,7 +177,6 @@ pub async fn load_all_pools(
     let abi = parse_abi(&[&format!("event {}", pair_created_event)]).unwrap();
 
     let pair_created_signature = abi.event("PairCreated").unwrap().signature();
-
     let mut id = if pools.len() > 0 {
         pools.last().as_ref().unwrap().id as i64
     } else {
@@ -174,11 +184,11 @@ pub async fn load_all_pools(
     };
     let last_id = id as i64;
 
-    let from_block = if id != -1 {
-        pools.last().as_ref().unwrap().block_number + 1
-    } else {
-        from_block
-    };
+    // let from_block = if id != -1 {
+    //     pools.last().as_ref().unwrap().block_number + 1
+    // } else {
+    //     from_block
+    // };
     let to_block = provider.get_block_number().await.unwrap().as_u64();
     let mut blocks_processed = 0;
 
@@ -216,11 +226,14 @@ pub async fn load_all_pools(
             pair_created_signature,
         )));
         let results = futures::future::join_all(requests).await;
+
+        let mut new_pools = Vec::new();
         for result in results {
             match result {
                 Ok(response) => match response {
                     Ok(pools_response) => {
-                        pools.extend(pools_response);
+                        // pools.extend(pools_response);
+                        new_pools.extend(pools_response);
                     }
                     _ => {}
                 },
@@ -228,60 +241,66 @@ pub async fn load_all_pools(
             }
         }
 
+        new_pools.sort_by_key(|p| p.block_number);
+        new_pools.retain(|p| !pools.iter().any(|existing| existing.address == p.address));
+
+        let mut added = 0;
+        for pool in new_pools.iter_mut() {
+            if pool.id == -1 {
+                id += 1;
+                pool.id = id;
+            }
+            if (pool.id as i64) > last_id {
+                writer.serialize(pool.cache_row())?;
+                pools.push(pool.clone());
+                added += 1;
+            }
+        }
+
+        writer.flush()?;
+        info!("Added {:?} new pools from block {} to {}", added, range.0, range.1);
+
         pb.inc(1);
     }
 
-    let mut added = 0;
-    pools.sort_by_key(|p| p.block_number);
-    for pool in pools.iter_mut() {
-        if pool.id == -1 {
-            id += 1;
-            pool.id = id;
-        }
-        if (pool.id as i64) > last_id {
-            writer.serialize(pool.cache_row())?;
-            added += 1;
-        }
-    }
-    writer.flush()?;
-    info!("Added {:?} new pools", added);
 
-    Ok((pools, last_id))
+    Ok(pools)
 }
 
 pub async fn load_uniswap_v2_pools(
     provider: Arc<Provider<Ws>>,
     from_block: u64,
     to_block: u64,
-    event: &str,
+    _event: &str,
     signature: H256,
 ) -> Result<Vec<Pool>> {
     let mut pools = Vec::new();
-    let mut timestamp_map = HashMap::new();
+    // let mut timestamp_map = HashMap::new();
 
     let event_filter = Filter::new()
         .from_block(U64::from(from_block))
         .to_block(U64::from(to_block))
-        .event(event);
+        .topic0(signature);
     let logs = provider.get_logs(&event_filter).await?;
 
     for log in logs {
         let topic = log.topics[0];
         let block_number = log.block_number.unwrap_or_default();
-
         if topic != signature {
             continue;
         }
 
-        let timestamp = if !timestamp_map.contains_key(&block_number) {
-            let block = provider.get_block(block_number).await.unwrap().unwrap();
-            let timestamp = block.timestamp.as_u64();
-            timestamp_map.insert(block_number, timestamp);
-            timestamp
-        } else {
-            let timestamp = *timestamp_map.get(&block_number).unwrap();
-            timestamp
-        };
+        let timestamp = 0;
+
+        // let timestamp = if !timestamp_map.contains_key(&block_number) {
+        //     let block = provider.get_block(block_number).await.unwrap().unwrap();
+        //     let timestamp = block.timestamp.as_u64();
+        //     timestamp_map.insert(block_number, timestamp);
+        //     timestamp
+        // } else {
+        //     let timestamp = *timestamp_map.get(&block_number).unwrap();
+        //     timestamp
+        // };
 
         let token0 = H160::from(log.topics[1]);
         let token1 = H160::from(log.topics[2]);
